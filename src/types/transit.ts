@@ -58,6 +58,8 @@ export interface TransitFilterOptions {
   refresh?: boolean;
 }
 
+export type RouteMode = Mode | '自駕';
+
 export interface RouteUpcomingTrip {
   trainNo: string;
   origin: string;
@@ -68,17 +70,38 @@ export interface RouteUpcomingTrip {
   durationText: string;
 }
 
+export interface RouteStep {
+  stepNo: number;
+  vehicle: string;
+  instruction: string;
+  detail: string;
+  duration: string;
+}
+
+export interface BookingLink {
+  label: string;
+  url: string;
+  primary?: boolean;
+}
+
 export interface RouteOptionItem {
-  mode: Mode;
+  mode: RouteMode;
   available: boolean;
   title: string;
   time: string;
   detail: string;
+  fareText?: string;
   color: string;
   hops: string;
   confidence: Confidence;
   source: string;
   upcomingTrips: RouteUpcomingTrip[];
+  bookingLinks?: BookingLink[];
+  navigationUrl?: string;
+  path?: [number, number][];
+  corridorEventsCount?: number;
+  corridorCamerasCount?: number;
+  steps?: RouteStep[];
 }
 
 export interface MultiModalRouteResult {
@@ -89,7 +112,11 @@ export interface MultiModalRouteResult {
   tdxConfigured?: boolean;
   resolvedOrigin?: string;
   resolvedDestination?: string;
+  originCoords?: [number, number];
+  destCoords?: [number, number];
+  distanceKm?: number;
   options: RouteOptionItem[];
   note?: string;
 }
+
 
