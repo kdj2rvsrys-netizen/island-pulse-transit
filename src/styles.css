@@ -22,3 +22,4 @@
 
 .event-marker.camera-cluster span{width:38px;height:38px;border-width:2px;font-size:12px;letter-spacing:-.03em}
 .side-data-foot>span{display:grid;gap:3px;min-width:0}.side-data-foot small{display:block;line-height:1.45;overflow-wrap:anywhere}
+.route-external-links{display:flex;flex-wrap:wrap;justify-content:center;gap:8px}
