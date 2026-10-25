@@ -85,6 +85,7 @@ export function RoutesPage() {
   }));
   const [selectedMode, setSelectedMode] = useState<RouteMode>('高鐵');
   const [selectedTripIdx, setSelectedTripIdx] = useState(0);
+  const [previewDemo, setPreviewDemo] = useState(false);
   const [routeResult, setRouteResult] = useState<MultiModalRouteResult>({
     status: 'loading',
     source: '交通部 TDX・城際鐵路 OD 時刻表與多運具整合',
@@ -144,8 +145,12 @@ export function RoutesPage() {
     ];
   }, [submittedRoute]);
 
-  const isLiveTdx = routeResult.status === 'available' && routeResult.options.length > 0;
-  const activeOptions = isLiveTdx ? routeResult.options : routeResult.status === 'unavailable' ? demoFallbackOptions : [];
+  const isLiveTdx = routeResult.status === 'available' && routeResult.options.some((item) => item.mode !== '自駕' && item.confidence === 'scheduled');
+  const demoModes = new Set(['高鐵', '台鐵', '捷運', '公車', '航班']);
+  const activeOptions = previewDemo && routeResult.tdxConfigured === false
+    ? [...routeResult.options.filter((item) => !demoModes.has(item.mode)), ...demoFallbackOptions.filter((item) => demoModes.has(item.mode))]
+    : routeResult.options;
+  const showingDemo = activeOptions.some((item) => item.confidence === 'demo');
   const filteredOptions = activeOptions.filter((item) => modes.includes(item.mode));
   const selectedOption = filteredOptions.find((item) => item.mode === selectedMode) ?? filteredOptions[0];
 
@@ -173,21 +178,23 @@ export function RoutesPage() {
       : routeResult.originCoords && routeResult.destCoords
         ? [routeResult.originCoords, routeResult.destCoords]
         : [[25.0478, 121.517], [22.6874, 120.3075]];
+  const googleTransitUrl = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(submittedRoute.from)}&destination=${encodeURIComponent(submittedRoute.to)}&travelmode=transit`;
+  const googleDrivingUrl = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(submittedRoute.from)}&destination=${encodeURIComponent(submittedRoute.to)}&travelmode=driving`;
 
   return <div className="content-page routes-page">
     <PageHeading
-      eyebrow={isLiveTdx ? 'MULTI-MODAL NAVIGATION / TDX + OSRM LIVE' : 'MULTI-MODAL NAVIGATION / PREVIEW'}
+      eyebrow={isLiveTdx ? 'ROUTE OPTIONS / OFFICIAL SCHEDULE + ROAD ESTIMATE' : 'ROUTE OPTIONS / VERIFIED DATA STATUS'}
       title="路線規劃與跨運具導航"
-      description="比對高鐵、台鐵、自駕、捷運、客運與航班，提供分段搭乘步驟、即時車次、預估票價與官方訂票連結。"
-      action={<DataBadge status={routeResult.status} confidence={isLiveTdx ? 'live' : 'demo'}/>}
+      description="查詢可驗證的城際班次、自駕道路估算，或開啟外部地圖規劃捷運與公車路線。"
+      action={<DataBadge status={routeResult.status} confidence={isLiveTdx ? 'scheduled' : routeResult.status === 'unavailable' ? 'demo' : 'estimated'}/>}
     />
     <div className="route-banner">
       <div className="route-banner-mark"><Icon name="route" size={25}/></div>
       <div>
-        <b>{isLiveTdx ? `導航走廊：${routeResult.resolvedOrigin} → ${routeResult.resolvedDestination}${routeResult.distanceKm ? `（道路里程約 ${routeResult.distanceKm} km）` : ''}` : '一趟旅程，多種走法'}</b>
-        <p>{isLiveTdx ? '點選任一交通工具可查看地圖路線軌跡、分段轉乘導航指令、當日接續班次與官方訂票入口。' : '輸入起訖點比較不同運具的行程結構。'}</p>
+        <b>{routeResult.resolvedOrigin && routeResult.resolvedDestination ? `行程：${routeResult.resolvedOrigin} → ${routeResult.resolvedDestination}` : '比較已查證的行程資訊'}</b>
+        <p>{isLiveTdx ? '班次只列出查到的官方時刻；開車時間是道路路徑估算，不含即時壅塞。其他運具會標示是否由外部服務查詢。' : '僅顯示可查證的資料；沒有班次資料時可開啟外部地圖，或選擇預覽明確標示的 Demo。'}</p>
       </div>
-      <span>{isLiveTdx ? 'TDX + OSRM 導航' : '路線預覽'}</span>
+      <span>{isLiveTdx ? '官方班表＋估算路徑' : '資料狀態透明'}</span>
     </div>
 
     <div className="mode-tabs" aria-label="熱門交通走廊快捷選擇">
@@ -225,9 +232,17 @@ export function RoutesPage() {
     </form>
 
     <div className="route-results-head">
-      <div><p className="eyebrow">SUGGESTED ROUTES</p><h2>{submittedRoute.from} → {submittedRoute.to}</h2></div>
-      <span>出發：{submittedRoute.departAt.replace('T', ' ')}（{isLiveTdx ? 'TDX 真實班表＋OSRM 導航' : 'Demo 示意'}）</span>
+      <div><p className="eyebrow">ROUTE COMPARISON</p><h2>{submittedRoute.from} → {submittedRoute.to}</h2></div>
+      <span>出發：{submittedRoute.departAt.replace('T', ' ')}（{isLiveTdx ? '含官方班表' : showingDemo ? '含 Demo 示意' : '目前查詢結果'}）</span>
     </div>
+
+    {routeResult.tdxConfigured === false && (
+      <div className="demo-callout route-demo-controls">
+        <Icon name="info"/>
+        <span><b>尚未設定 TDX 憑證</b>・目前沒有可驗證的本機班次資料；Demo 僅供介面預覽。</span>
+        <label><input type="checkbox" checked={previewDemo} onChange={(event) => setPreviewDemo(event.target.checked)}/> 預覽 Demo 示意方案</label>
+      </div>
+    )}
 
     <div className="route-results">
       {filteredOptions.map((item, index) => (
@@ -246,6 +261,16 @@ export function RoutesPage() {
           <Icon name="chevron" size={17}/>
         </button>
       ))}
+      {filteredOptions.length === 0 && modes.length > 0 && (
+        <div className="state-panel compact-state">
+          <h3>{routeResult.status === 'error' ? '路線查詢失敗' : '目前沒有可驗證的班次方案'}</h3>
+          <p>{routeResult.note ?? '可以直接交由外部地圖查詢大眾運輸或開車路線。'}</p>
+          <div className="route-external-links">
+            <a className="button-secondary" href={googleTransitUrl} target="_blank" rel="noreferrer">在 Google 地圖查大眾運輸</a>
+            <a className="button-secondary" href={googleDrivingUrl} target="_blank" rel="noreferrer">在 Google 地圖查開車路線</a>
+          </div>
+        </div>
+      )}
       {modes.length === 0 && <div className="state-panel compact-state"><h3>請至少選擇一種運具或導航模式</h3></div>}
     </div>
 
@@ -286,7 +311,7 @@ export function RoutesPage() {
         </div>
 
         {/* 互動式路線軌跡地圖 */}
-        <div style={{ height: 270, borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)', position: 'relative' }}>
+        {selectedOption.path && selectedOption.path.length >= 2 && <div style={{ height: 270, borderRadius: 12, overflow: 'hidden', border: '1px solid var(--border)', position: 'relative' }}>
           <MapContainer center={routePath[0]} zoom={9} scrollWheelZoom={false} style={{ height: '100%', width: '100%' }}>
             <TileLayer attribution={MAP_ATTRIBUTION} url={MAP_TILE_URL}/>
             <FitRouteBounds path={routePath}/>
@@ -298,9 +323,11 @@ export function RoutesPage() {
               <Tooltip direction="top" permanent>目的：{submittedRoute.to}</Tooltip>
             </Marker>
           </MapContainer>
-        </div>
+        </div>}
 
         {/* 分段搭乘與導航步驟 (Step-by-Step) */}
+        {!selectedOption.available && <div className="state-panel compact-state"><h3>此方案尚未在本站規劃</h3><p>{selectedOption.detail}</p></div>}
+
         {activeSteps.length > 0 && (
           <div>
             <b style={{ display: 'block', marginBottom: 8 }}>分段搭乘與導航步驟（Step-by-Step）</b>
@@ -353,8 +380,8 @@ export function RoutesPage() {
     <div className="route-disclaimer">
       <Icon name="info"/>
       <div>
-          <b>{isLiveTdx ? '資料來源：交通部 TDX ＋ OSRM 道路導航引擎 ＋ 警廣即時路況' : routeResult.status === 'error' ? '路線查詢未完成' : '尚未連接 TDX 路線查詢'}</b>
-          <p>{isLiveTdx ? '高鐵與台鐵顯示當日官方 OD 班表，自駕路線由 OSRM 計算道路里程並掃描沿線警廣事件與測速點；捷運、客運及航班為概略轉乘建議與費用估算，請以各業者官方系統確認班次、票價和接駁。' : routeResult.status === 'error' ? (routeResult.note ?? '請修正起訖地點後重試。') : '目前顯示 Demo 示意資料。'}</p>
+          <b>{isLiveTdx ? '班次資料來源：交通部 TDX' : routeResult.status === 'error' ? '路線查詢未完成' : routeResult.tdxConfigured === false && !previewDemo ? 'TDX 班次不可用' : showingDemo ? '目前顯示 Demo 示意資料' : '路線資料說明'}</b>
+          <p>{isLiveTdx ? '高鐵與台鐵僅在取得當日官方班表時才顯示班次；自駕時間為 OSRM 路徑估算，不代表即時交通。未接入完整轉乘規劃的運具會引導至外部地圖，不提供推測票價或班次。' : routeResult.status === 'error' ? (routeResult.note ?? '請修正起訖地點後重試。') : routeResult.tdxConfigured === false && !previewDemo ? 'TDX 憑證未設定。自駕道路估算仍可使用；高鐵、台鐵班次需查詢官方班表，或勾選 Demo 預覽檢視示意畫面。' : showingDemo ? 'Demo 資料只供介面預覽，不代表實際班次、行車時間或票價。' : '運具卡片會標明本站查詢、外部地圖引導或目前不可用。'} </p>
       </div>
     </div>
   </div>;

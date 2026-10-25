@@ -102,6 +102,10 @@ export interface RouteOptionItem {
   path?: [number, number][];
   corridorEventsCount?: number;
   corridorCamerasCount?: number;
+  corridorEventsStatus?: DataStatus;
+  corridorEventsUpdatedAt?: string;
+  corridorCamerasStatus?: DataStatus;
+  corridorCamerasUpdatedAt?: string;
   steps?: RouteStep[];
 }
 

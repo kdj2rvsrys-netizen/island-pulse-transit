@@ -2,6 +2,7 @@ import { createServer } from 'node:http';
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { extname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { formatCorridorMetric, getCorridorMetric } from './route-data.mjs';
 import {
   extractCsvFromZipBuffer,
   mergeSpeedCameras,
@@ -414,7 +415,7 @@ async function fetchDrivingRoute(originCoords, destCoords) {
           : [originCoords, destCoords];
         const legs = Array.isArray(route.legs?.[0]?.steps) ? route.legs[0].steps : [];
         const roadNames = [...new Set(legs.map((step) => step.name || step.ref).filter((n) => n && n.length > 1))].slice(0, 5);
-        return { distanceKm, durationMinutes, path: coords, roadNames };
+        return { distanceKm, durationMinutes, path: coords, roadNames, hasRoadGeometry: coords.length >= 2 };
       }
     }
   } catch {
@@ -425,13 +426,15 @@ async function fetchDrivingRoute(originCoords, destCoords) {
   return {
     distanceKm,
     durationMinutes,
-    path: [originCoords, [(originCoords[0] + destCoords[0]) / 2, (originCoords[1] + destCoords[1]) / 2], destCoords],
-    roadNames: ['主要國道／省道走廊'],
+    path: [],
+    roadNames: [],
+    hasRoadGeometry: false,
+    note: 'OSRM 暫時無法提供道路路徑；下列距離與時間僅為粗略推估。',
   };
 }
 
 async function countCorridorAlerts(path = []) {
-  if (!path.length) return { eventsCount: 0, camerasCount: 0 };
+  if (path.length < 2) return { events: getCorridorMetric({ status: 'error' }, 0), cameras: getCorridorMetric({ status: 'error' }, 0) };
   const samplePoints = path.filter((_, idx) => idx % Math.max(1, Math.floor(path.length / 18)) === 0 || idx === path.length - 1);
   const [eventsResult, camerasResult] = await Promise.all([
     roadEventCache?.result ? Promise.resolve(roadEventCache.result) : getRoadEvents(),
@@ -448,7 +451,10 @@ async function countCorridorAlerts(path = []) {
   for (const cam of cameras) {
     if (samplePoints.some((pt) => haversineKm(pt, cam.coordinates) <= 2.2)) camerasCount += 1;
   }
-  return { eventsCount, camerasCount };
+  return {
+    events: getCorridorMetric(eventsResult, eventsCount),
+    cameras: getCorridorMetric(camerasResult, camerasCount),
+  };
 }
 
 async function getTransitTrips(mode = '高鐵', options = {}) {
@@ -637,8 +643,8 @@ async function getTransitTrips(mode = '高鐵', options = {}) {
           route: `${item.AirlineID || ''} ${item.FlightNumber || ''}`.trim(),
           origin: item.DepartureAirportID || airport,
           destination: item.ArrivalAirportID || '目的地',
-          departure: (item.ScheduleDepartureTime || '').slice(11, 16) || '--:--',
-          arrival: (item.EstimatedDepartureTime || item.ActualDepartureTime || item.ScheduleDepartureTime || '').slice(11, 16) || '--:--',
+          departure: (item.EstimatedDepartureTime || item.ActualDepartureTime || item.ScheduleDepartureTime || '').slice(11, 16) || '--:--',
+          arrival: null,
           status: item.DepartureRemark || '準時／時刻表',
           meta: { source: `交通部 TDX・${airportNames[airport] || airport}即時航班 v2`, updatedAt: (item.UpdateTime || today).slice(0, 16).replace('T', ' '), fetchedAt, status: 'available', confidence: 'live' },
         };
@@ -673,45 +679,18 @@ async function getTransitTrips(mode = '高鐵', options = {}) {
     return result;
   } catch {
     if (cached) return { ...cached.result, status: 'stale', note: 'TDX 連線暫時異常，顯示快取資料。' };
-    const { date: today, dateTime: twDateTime } = getTaiwanNow();
     const fetchedAt = new Date().toISOString();
-    const fallbackData = [
-      { id: `fb-${mode}-1`, mode, route: mode === '航班' ? `${airport} 定期航班 CI/BR/IT` : `${mode} 定期班次 01`, origin: mode === '航班' ? airport : '起點站', destination: mode === '航班' ? '國際／國內航線' : '終點站', departure: '08:00', arrival: '09:45', status: '定期班表（額度保護中）', meta: { source: `交通部 TDX・${mode}公開資料服務（離線／頻率保護班表）`, updatedAt: today, fetchedAt, status: 'available', confidence: 'scheduled' } },
-      { id: `fb-${mode}-2`, mode, route: mode === '航班' ? `${airport} 定期航班 JX/AE/B7` : `${mode} 定期班次 02`, origin: mode === '航班' ? airport : '起點站', destination: mode === '航班' ? '國際／國內航線' : '終點站', departure: '09:30', arrival: '11:15', status: '定期班表（額度保護中）', meta: { source: `交通部 TDX・${mode}公開資料服務（離線／頻率保護班表）`, updatedAt: today, fetchedAt, status: 'available', confidence: 'scheduled' } },
-    ];
     return {
-      data: fallbackData,
-      status: 'available',
+      data: [],
+      status: 'error',
       source: `交通部 TDX・${mode}公開資料服務`,
-      updatedAt: twDateTime,
+      updatedAt: '',
       fetchedAt,
       confidence: 'scheduled',
       tdxConfigured: true,
-      note: 'TDX 免費金鑰每分鐘請求上限（5 次/分）保護中，目前顯示定期班表；稍候將自動恢復即時查詢。',
+      note: 'TDX 目前無法連線，且沒有可用快取資料；未顯示推測班次。請稍後重試。',
     };
   }
-}
-
-function buildFallbackOdTrips(prefix, originName, destName, timePart, baseDurationMins) {
-  const [bh, bm] = (timePart || '08:00').split(':').map(Number);
-  const startMins = (Number.isFinite(bh) ? bh : 8) * 60 + (Number.isFinite(bm) ? bm : 0);
-  const trips = [];
-  for (let i = 0; i < 6; i += 1) {
-    const depTotal = (startMins + 15 + i * 30) % (24 * 60);
-    const arrTotal = (depTotal + baseDurationMins) % (24 * 60);
-    const dep = `${String(Math.floor(depTotal / 60)).padStart(2, '0')}:${String(depTotal % 60).padStart(2, '0')}`;
-    const arr = `${String(Math.floor(arrTotal / 60)).padStart(2, '0')}:${String(arrTotal % 60).padStart(2, '0')}`;
-    trips.push({
-      trainNo: `${prefix} ${101 + i * 4} 次`,
-      origin: originName,
-      destination: destName,
-      departure: dep,
-      arrival: arr,
-      durationMinutes: baseDurationMins,
-      durationText: formatDuration(baseDurationMins),
-    });
-  }
-  return trips;
 }
 
 async function getMultiModalRoutes({ from = '臺北車站', to = '左營站', departAt = '' }) {
@@ -737,17 +716,7 @@ async function getMultiModalRoutes({ from = '臺北車站', to = '左營站', de
   const datePart = (departAt && departAt.slice(0, 10)) || twNow.date;
   const timePart = (departAt && departAt.slice(11, 16)) || twNow.time;
 
-  if (!clientId || !clientSecret) {
-    return {
-      status: 'unavailable',
-      source: '交通部 TDX 運輸資料流通服務平臺',
-      updatedAt: '',
-      fetchedAt,
-      tdxConfigured: false,
-      options: [],
-      note: '尚未設定 TDX 伺服器憑證。',
-    };
-  }
+  const tdxConfigured = Boolean(clientId && clientSecret);
 
   const originCoords = originHub.coords;
   const destCoords = destHub.coords;
@@ -763,18 +732,12 @@ async function getMultiModalRoutes({ from = '臺北車站', to = '左營站', de
     { label: '高鐵網路訂票系統', url: 'https://irs.thsrc.com.tw/IMINT/', primary: true },
     { label: '高鐵時刻表與票價查詢', url: 'https://www.thsrc.com.tw/ArticleContent/a3b630bb-1066-4352-a1ef-58c7b4e8ef7c' },
   ];
-  if (originHub?.thsrId && destHub?.thsrId && originHub.thsrId !== destHub.thsrId) {
+  if (!tdxConfigured) {
+    options.push({ mode: '高鐵', available: false, title: '尚無法查詢高鐵班次', time: '需要 TDX 憑證', detail: '此線上服務尚未設定 TDX 憑證；請直接查詢高鐵官方班表。', color: '#0c817a', hops: '班次未查證', confidence: 'estimated', source: '交通部 TDX 憑證未設定', upcomingTrips: [], bookingLinks: thsrBookings, navigationUrl: transitGoogleUrl });
+  } else if (originHub?.thsrId && destHub?.thsrId && originHub.thsrId !== destHub.thsrId) {
     const thsrFare = estimateThsrFare(originHub.thsrId, destHub.thsrId);
     const s1 = THSR_STATIONS.find((s) => s.id === originHub.thsrId);
     const s2 = THSR_STATIONS.find((s) => s.id === destHub.thsrId);
-    const idx1 = THSR_STATIONS.findIndex((s) => s.id === originHub.thsrId);
-    const idx2 = THSR_STATIONS.findIndex((s) => s.id === destHub.thsrId);
-    const stationPath = THSR_STATIONS
-      .slice(Math.min(idx1, idx2), Math.max(idx1, idx2) + 1)
-      .map((s) => s.coords);
-    if (idx1 > idx2) stationPath.reverse();
-    const thsrPath = [originCoords, ...stationPath, destCoords];
-    const estMins = Math.max(20, Math.round(Math.abs((s1?.km || 0) - (s2?.km || 160)) / 3.1));
 
     try {
       const fullDayUrl = `${TDX_API_BASE}/v2/Rail/THSR/DailyTimetable/TrainDate/${datePart}?$top=160&$format=JSON`;
@@ -822,7 +785,6 @@ async function getMultiModalRoutes({ from = '臺北車站', to = '左營站', de
           upcomingTrips: upcoming,
           bookingLinks: thsrBookings,
           navigationUrl: transitGoogleUrl,
-          path: thsrPath,
           steps: [
             { stepNo: 1, vehicle: '市區接駁／步行', instruction: `由「${from}」前往高鐵${first.origin}站`, detail: '建議預留 15–20 分鐘進站驗票與候車', duration: '約 15 分' },
             { stepNo: 2, vehicle: first.trainNo, instruction: `搭乘 ${first.trainNo}（高鐵${first.origin}站 → 高鐵${first.destination}站）`, detail: `${first.departure} 出發 → ${first.arrival} 抵達・${thsrFare}`, duration: first.durationText },
@@ -832,29 +794,20 @@ async function getMultiModalRoutes({ from = '臺北車站', to = '左營站', de
       } else {
         throw new Error('無直達班次');
       }
-    } catch {
-      const fbTrips = buildFallbackOdTrips('高鐵', s1?.name || originHub.label, s2?.name || destHub.label, timePart, estMins);
-      const first = fbTrips[0];
+    } catch (error) {
       options.push({
         mode: '高鐵',
-        available: true,
-        title: `${first.trainNo}・高鐵${first.origin}站 → 高鐵${first.destination}站`,
-        time: formatDuration(estMins),
-        detail: `${first.departure} 發車 → ${first.arrival} 抵達・${thsrFare}`,
-        fareText: thsrFare,
+        available: false,
+        title: `高鐵班次暫時無法確認・${s1?.name || originHub.label} → ${s2?.name || destHub.label}`,
+        time: '請查官方班表',
+        detail: error instanceof Error ? error.message : 'TDX 尚未提供可確認的班次資料。',
         color: '#0c817a',
-        hops: '高鐵直達',
-        confidence: 'scheduled',
-        source: '交通部 TDX・台灣高鐵路網時刻',
-        upcomingTrips: fbTrips,
+        hops: '班次未確認',
+        confidence: 'estimated',
+        source: '交通部 TDX 班表查詢失敗',
+        upcomingTrips: [],
         bookingLinks: thsrBookings,
         navigationUrl: transitGoogleUrl,
-        path: thsrPath,
-        steps: [
-          { stepNo: 1, vehicle: '進站候車', instruction: `由「${from}」前往高鐵${first.origin}站`, detail: '通過高鐵閘門前往月台候車', duration: '約 15 分' },
-          { stepNo: 2, vehicle: first.trainNo, instruction: `搭乘 ${first.trainNo}（高鐵${first.origin}站 → 高鐵${first.destination}站）`, detail: `${first.departure} 出發 → ${first.arrival} 抵達・${thsrFare}`, duration: formatDuration(estMins) },
-          { stepNo: 3, vehicle: '出站轉乘', instruction: `抵達高鐵${first.destination}站前往「${to}」`, detail: '依指標轉乘捷運或市區公車', duration: '約 15 分' },
-        ],
       });
     }
   } else {
@@ -872,7 +825,6 @@ async function getMultiModalRoutes({ from = '臺北車站', to = '左營站', de
       upcomingTrips: [],
       bookingLinks: thsrBookings,
       navigationUrl: transitGoogleUrl,
-      path: [originCoords, destCoords],
       steps: [
         { stepNo: 1, vehicle: '路網說明', instruction: `「${from} → ${to}」無高鐵直達車站`, detail: '建議改選下方「台鐵」直達方案，或搭乘高鐵至南港／左營站轉乘台鐵', duration: '需轉乘' },
       ],
@@ -885,8 +837,9 @@ async function getMultiModalRoutes({ from = '臺北車站', to = '左營站', de
     { label: '台鐵列車時刻／票價查詢', url: 'https://www.railway.gov.tw/tra-tip-web/tip/tip001/tip112/gobytime' },
   ];
   const traFare = estimateTraFare(originCoords, destCoords);
-  const estTraMins = Math.max(25, Math.round(drivingRoute.distanceKm * 0.82));
-  if (originHub?.traId && destHub?.traId && originHub.traId !== destHub.traId) {
+  if (!tdxConfigured) {
+    options.push({ mode: '台鐵', available: false, title: '尚無法查詢台鐵班次', time: '需要 TDX 憑證', detail: '此線上服務尚未設定 TDX 憑證；請直接查詢台鐵官方班表。', color: '#da8a2c', hops: '班次未查證', confidence: 'estimated', source: '交通部 TDX 憑證未設定', upcomingTrips: [], bookingLinks: traBookings, navigationUrl: transitGoogleUrl });
+  } else if (originHub?.traId && destHub?.traId && originHub.traId !== destHub.traId) {
     try {
       const traUrl = `${TDX_API_BASE}/v2/Rail/TRA/DailyTimetable/OD/${originHub.traId}/to/${destHub.traId}/${datePart}?$format=JSON`;
       const raw = await fetchTdxJson(traUrl);
@@ -929,7 +882,6 @@ async function getMultiModalRoutes({ from = '臺北車站', to = '左營站', de
           upcomingTrips: upcoming,
           bookingLinks: traBookings,
           navigationUrl: transitGoogleUrl,
-          path: [originCoords, originHub.stationCoords, destHub.stationCoords, destCoords],
           steps: [
             { stepNo: 1, vehicle: '市區接駁／進站', instruction: `由「${from}」前往台鐵${first.origin}站`, detail: '可使用電子票證（悠遊卡／一卡通）或對號座車票進站（EMU3000／普悠瑪／太魯閣須先購票）', duration: '約 10–15 分' },
             { stepNo: 2, vehicle: first.trainNo, instruction: `搭乘 ${first.trainNo}（台鐵${first.origin}站 → 台鐵${first.destination}站）`, detail: `${first.departure} 出發 → ${first.arrival} 抵達・${traFare}`, duration: first.durationText },
@@ -939,29 +891,20 @@ async function getMultiModalRoutes({ from = '臺北車站', to = '左營站', de
       } else {
         throw new Error('無直達班次');
       }
-    } catch {
-      const fbTrips = buildFallbackOdTrips('自強號', originHub.label, destHub.label, timePart, estTraMins);
-      const first = fbTrips[0];
+    } catch (error) {
       options.push({
         mode: '台鐵',
-        available: true,
-        title: `${first.trainNo}・台鐵${first.origin}站 → 台鐵${first.destination}站`,
-        time: formatDuration(estTraMins),
-        detail: `${first.departure} 發車 → ${first.arrival} 抵達・${traFare}`,
-        fareText: traFare,
+        available: false,
+        title: `台鐵班次暫時無法確認・${originHub.label} → ${destHub.label}`,
+        time: '請查官方班表',
+        detail: error instanceof Error ? error.message : 'TDX 尚未提供可確認的班次資料。',
         color: '#da8a2c',
-        hops: '台鐵直達',
-        confidence: 'scheduled',
-        source: '交通部 TDX・台鐵幹線班表',
-        upcomingTrips: fbTrips,
+        hops: '班次未確認',
+        confidence: 'estimated',
+        source: '交通部 TDX 班表查詢失敗',
+        upcomingTrips: [],
         bookingLinks: traBookings,
         navigationUrl: transitGoogleUrl,
-        path: [originCoords, originHub.stationCoords, destHub.stationCoords, destCoords],
-        steps: [
-          { stepNo: 1, vehicle: '進站候車', instruction: `由「${from}」前往台鐵${originHub.label}站`, detail: '依列車月台指標候車', duration: '約 12 分' },
-          { stepNo: 2, vehicle: first.trainNo, instruction: `搭乘 ${first.trainNo}（台鐵${originHub.label}站 → 台鐵${destHub.label}站）`, detail: `${first.departure} 出發 → ${first.arrival} 抵達・${traFare}`, duration: formatDuration(estTraMins) },
-          { stepNo: 3, vehicle: '出站轉乘', instruction: `由台鐵${destHub.label}站前往「${to}」`, detail: '依站區出口指標前往目的地', duration: '約 12 分' },
-        ],
       });
     }
   }
@@ -969,144 +912,80 @@ async function getMultiModalRoutes({ from = '臺北車站', to = '左營站', de
   // 3. 自駕／汽車導航 (Driving Navigation with OSRM + Live Corridor Alerts)
   const tollEst = drivingRoute.distanceKm > 25 ? Math.round(Math.max(0, drivingRoute.distanceKm - 20) * 1.2) : 0;
   const fuelEst = Math.round(drivingRoute.distanceKm * 2.4);
+  const corridorEvents = formatCorridorMetric('即時路況', corridorAlerts.events);
+  const corridorCameras = formatCorridorMetric('測速點', corridorAlerts.cameras);
   options.push({
     mode: '自駕',
     available: true,
-    title: `自駕道路導航・${from} → ${to}（約 ${drivingRoute.distanceKm} 公里）`,
+    title: `${drivingRoute.hasRoadGeometry ? '自駕路徑' : '自駕概略估算'}・${from} → ${to}（約 ${drivingRoute.distanceKm} 公里）`,
     time: formatDuration(drivingRoute.durationMinutes),
-    detail: `途經：${drivingRoute.roadNames.join(' → ') || '國道／省道主幹'}・沿線偵測 ${corridorAlerts.eventsCount} 筆即時路況、${corridorAlerts.camerasCount} 處固定測速點`,
+    detail: `${drivingRoute.hasRoadGeometry ? `途經：${drivingRoute.roadNames.join(' → ') || '主要道路'}` : drivingRoute.note}・沿線${corridorEvents}、${corridorCameras}`,
     fareText: `預估油資約 NT$${fuelEst}・eTag 國道通行費約 NT$${tollEst}`,
     color: '#2563eb',
     hops: `${drivingRoute.distanceKm} km`,
-    confidence: 'live',
-    source: 'OSRM 道路導航引擎 ＋ 警廣路況(15221) ＋ 警政署測速(7320/13940)',
+    confidence: 'estimated',
+    source: `OSRM 道路路徑估時；警廣路況狀態：${corridorAlerts.events.status}；官方測速清冊狀態：${corridorAlerts.cameras.status}`,
     upcomingTrips: [],
     bookingLinks: [
       { label: '開啟 Google Maps 語音導航', url: drivingGoogleUrl, primary: true },
       { label: '高公局 1968 即時路況', url: 'https://1968.freeway.gov.tw/' },
     ],
     navigationUrl: drivingGoogleUrl,
-    path: drivingRoute.path,
-    corridorEventsCount: corridorAlerts.eventsCount,
-    corridorCamerasCount: corridorAlerts.camerasCount,
+    path: drivingRoute.hasRoadGeometry ? drivingRoute.path : undefined,
+    corridorEventsCount: corridorAlerts.events.count ?? undefined,
+    corridorCamerasCount: corridorAlerts.cameras.count ?? undefined,
+    corridorEventsStatus: corridorAlerts.events.status,
+    corridorEventsUpdatedAt: corridorAlerts.events.updatedAt,
+    corridorCamerasStatus: corridorAlerts.cameras.status,
+    corridorCamerasUpdatedAt: corridorAlerts.cameras.updatedAt,
     steps: [
       { stepNo: 1, vehicle: '出發上路', instruction: `由「${from}」出發匯入主幹道路`, detail: `總里程約 ${drivingRoute.distanceKm} 公里，預估行車時間 ${formatDuration(drivingRoute.durationMinutes)}`, duration: '起點出發' },
-      { stepNo: 2, vehicle: '主要行駛路段', instruction: `行駛 ${drivingRoute.roadNames.join(' → ') || '主要國道與省道走廊'}`, detail: `沿線走廊目前有 ${corridorAlerts.eventsCount} 筆警廣即時路況通報、${corridorAlerts.camerasCount} 處官方固定式測速照相點`, duration: formatDuration(drivingRoute.durationMinutes) },
+      { stepNo: 2, vehicle: '主要行駛路段', instruction: drivingRoute.hasRoadGeometry ? `行駛 ${drivingRoute.roadNames.join(' → ') || '主要道路'}` : '請在 Google 地圖開啟可導航路徑', detail: `沿線${corridorEvents}、${corridorCameras}`, duration: formatDuration(drivingRoute.durationMinutes) },
       { stepNo: 3, vehicle: '抵達目的地', instruction: `抵達「${to}」周邊停車與下客區`, detail: `預估油資 NT$${fuelEst}、國道 eTag 通行費約 NT$${tollEst}`, duration: '抵達終點' },
     ],
   });
 
-  // 4. 捷運 (Metro)
-  const metroOp = originHub?.metroOp || destHub?.metroOp || 'TRTC';
-  const sameMetro = Boolean(originHub?.metroOp && originHub.metroOp === destHub?.metroOp);
-  const metroLinks = [
-    { label: '台北捷運路網與票價查詢', url: 'https://www.metro.taipei/cp.aspx?n=ECEADC266D7120A7', primary: metroOp === 'TRTC' },
-    { label: '高雄捷運時刻與票價查詢', url: 'https://www.krtc.com.tw/', primary: metroOp === 'KRTC' },
-    { label: '桃園機場捷運乘車指南', url: 'https://www.tymetro.com.tw/', primary: metroOp === 'TYMC' },
-  ];
-  options.push({
-    mode: '捷運',
-    available: Boolean(originHub?.metroOp || destHub?.metroOp),
-    title: sameMetro
-      ? `都會捷運路網・${originHub.label} ↔ ${destHub.label}`
-      : `都會捷運＋城際轉乘（${originHub?.metroOp || destHub?.metroOp || 'TRTC'}）`,
-    time: sameMetro ? '約 18–42 分' : '頭末段都會接駁',
-    detail: sameMetro
-      ? `同一都會捷運路網（${metroOp}），營運時間 06:00–24:00，尖峰班距約 3–6 分鐘`
-      : `跨縣市行程可由起訖端搭乘 ${metroOp} 都會捷運前往高鐵／台鐵車站轉乘`,
-    fareText: sameMetro ? '單程票約 NT$20–65（電子票證享常客回饋）' : '都會段 NT$20–55 ＋ 城際鐵路票價',
-    color: '#4d6b9e',
-    hops: sameMetro ? '捷運直達/站內轉乘' : '捷運＋鐵路轉乘',
-    confidence: 'scheduled',
-    source: `交通部 TDX・${metroOp} 營運路網資料`,
+  // These modes are external route searches until this app can calculate their real itineraries.
+  const externalTransitOption = (mode, color) => ({
+    mode,
+    available: false,
+    title: `${mode}路線由外部服務查詢`,
+    time: '尚無可靠估時',
+    detail: '目前沒有可核對的起訖路線、班次與轉乘資料；開啟 Google 地圖查看可用方案。',
+    color,
+    hops: '外部查詢',
+    confidence: 'estimated',
+    source: 'Google 地圖外部路線查詢',
     upcomingTrips: [],
-    bookingLinks: metroLinks,
+    bookingLinks: [],
     navigationUrl: transitGoogleUrl,
-    path: [originCoords, originHub.stationCoords, destHub.stationCoords, destCoords],
-    steps: sameMetro
-      ? [
-          { stepNo: 1, vehicle: '步行進站', instruction: `前往鄰近「${from}」之 ${metroOp} 捷運站`, detail: '支援悠遊卡、一卡通、愛金卡及信用卡感應進站', duration: '約 5 分' },
-          { stepNo: 2, vehicle: `${metroOp} 捷運列車`, instruction: `搭乘 ${metroOp} 列車前往「${to}」鄰近車站`, detail: '營運時間 06:00–24:00，尖峰約 3–6 分鐘一班', duration: '約 18–35 分' },
-          { stepNo: 3, vehicle: '出站步行', instruction: `依出口指標步行抵達「${to}」`, detail: '可搭配站外 YouBike 2.0 公共自行車接駁', duration: '約 5 分' },
-        ]
-      : [
-          { stepNo: 1, vehicle: `${originHub?.metroOp || '市區'}捷運`, instruction: `由「${from}」搭乘捷運前往${originHub.hubName}`, detail: '共構車站可由地下連通道直達高鐵／台鐵月台', duration: '約 15–25 分' },
-          { stepNo: 2, vehicle: '高鐵／台鐵主幹', instruction: `由${originHub.hubName}搭乘城際列車至${destHub.hubName}`, detail: '請參考上方高鐵或台鐵即時班次表選擇車次', duration: '依城際班次' },
-          { stepNo: 3, vehicle: `${destHub?.metroOp || '目的端'}轉乘`, instruction: `於${destHub.hubName}轉乘捷運或市區公車前往「${to}」`, detail: '出站即達都會轉乘路網', duration: '約 15–25 分' },
-        ],
   });
-
-  // 5. 公車／國道客運 (Bus / Intercity Coach)
-  const busCity = originHub?.busCity || 'Taipei';
-  const sameCityBus = originHub.busCity === destHub.busCity;
-  const coachDuration = sameCityBus ? '約 25–50 分' : formatDuration(Math.round(drivingRoute.durationMinutes * 1.22));
-  const coachFare = sameCityBus
-    ? '市區公車一段票 NT$15–30'
-    : `國道客運約 NT$${Math.max(80, Math.round(drivingRoute.distanceKm * 1.65)).toLocaleString()}`;
-  options.push({
-    mode: '公車',
-    available: true,
-    title: sameCityBus
-      ? `市區幹線公車・${from} → ${to}`
-      : `國道客運／公路客運・${originHub.label}轉運站 → ${destHub.label}`,
-    time: coachDuration,
-    detail: sameCityBus
-      ? `已連線 TDX ${busCity} 即時公車預估到站服務；可於「大眾運輸 → 公車」查看即時進站倒數`
-      : `可於${originHub.label}轉運站搭乘國光／統聯／和欣等國道客運直達${destHub.label}`,
-    fareText: coachFare,
-    color: '#5175a4',
-    hops: sameCityBus ? '市區幹線' : '國道客運直達',
-    confidence: 'live',
-    source: `交通部 TDX・${busCity} 市區公車與公路客運資料`,
-    upcomingTrips: [],
-    bookingLinks: [
-      { label: '公路客運即時動態 (台灣公車通)', url: 'https://www.taiwanbus.tw/', primary: true },
-      { label: '國光客運網路訂票', url: 'https://order.kingbus.com.tw/' },
-      { label: '統聯客運網路訂票', url: 'https://www.ubus.com.tw/' },
-    ],
-    navigationUrl: transitGoogleUrl,
-    path: drivingRoute.path,
-    steps: [
-      { stepNo: 1, vehicle: '前往候車站／轉運站', instruction: sameCityBus ? `步行至「${from}」鄰近公車候車亭` : `前往${originHub.label}國道客運轉運站`, detail: '建議出發前查看即時到站倒數或線上預訂客運座位', duration: '約 10 分' },
-      { stepNo: 2, vehicle: sameCityBus ? '市區幹線公車' : '國道客運班車', instruction: `${originHub.label} → ${destHub.label}`, detail: `${coachFare}・上下車請刷電子票證或出示客運車票`, duration: coachDuration },
-      { stepNo: 3, vehicle: '下車步行', instruction: `於鄰近站牌或${destHub.label}轉運站下車前往「${to}」`, detail: '抵達目的地', duration: '約 10 分' },
-    ],
-  });
-
-  // 6. 航班 (Air)
-  const airOrigin = originHub?.airport || 'TSA';
-  const airDest = destHub?.airport || 'KHH';
+  options.push(externalTransitOption('捷運', '#4d6b9e'));
+  options.push(externalTransitOption('公車', '#5175a4'));
   options.push({
     mode: '航班',
-    available: airOrigin !== airDest,
-    title: `國內／區域航線接駁（${airOrigin} ✈ ${airDest}）`,
-    time: airOrigin !== airDest ? '約 55–75 分（航程）' : '同機場生活圈',
-    detail: `出發鄰近機場：${airOrigin}、目的鄰近機場：${airDest}；可於「大眾運輸 → 航班」查看即時起降狀態`,
-    fareText: airOrigin !== airDest ? '國內航線單程約 NT$1,800–2,600' : '同生活圈建議改搭陸路運具',
+    available: false,
+    title: '航班行程由業者班表查詢',
+    time: '尚無可靠估時',
+    detail: '此頁尚未將航班時刻、票價與機場接駁串成完整行程。',
     color: '#4074b3',
-    hops: airOrigin !== airDest ? '機場航線' : '不需搭機',
-    confidence: 'live',
-    source: '交通部 TDX・航空即時航班資訊 v2',
+    hops: '業者查詢',
+    confidence: 'estimated',
+    source: '航班與機場接駁尚未整合',
     upcomingTrips: [],
     bookingLinks: [
-      { label: '立榮航空網路訂票', url: 'https://www.uniair.com.tw/', primary: true },
-      { label: '華信航空網路訂票', url: 'https://www.mandarin-airlines.com/' },
-    ],
-    navigationUrl: transitGoogleUrl,
-    path: [originCoords, destCoords],
-    steps: [
-      { stepNo: 1, vehicle: '前往機場報到', instruction: `由「${from}」前往 ${airOrigin} 機場航廈`, detail: '國內線建議起飛前 45–60 分鐘完成報到與安檢', duration: '約 45 分' },
-      { stepNo: 2, vehicle: '定期航班', instruction: `${airOrigin} 機場 ✈ ${airDest} 機場`, detail: '實際航班動態可於「大眾運輸 → 航班」即時查詢', duration: '約 55–75 分' },
-      { stepNo: 3, vehicle: '機場聯外交通', instruction: `由 ${airDest} 機場轉乘捷運／機場巴士前往「${to}」`, detail: '抵達目的地', duration: '約 25 分' },
+      { label: '立榮航空', url: 'https://www.uniair.com.tw/' },
+      { label: '華信航空', url: 'https://www.mandarin-airlines.com/' },
     ],
   });
 
   return {
     status: 'available',
-    source: '交通部 TDX・OD 班表 ＋ OSRM 導航引擎 ＋ 警廣路況整合',
+    source: `${tdxConfigured ? '交通部 TDX OD 班表＋' : ''}OSRM 導航引擎＋警廣路況狀態`,
     updatedAt: `${datePart} ${timePart}`,
     fetchedAt,
-    tdxConfigured: true,
+    tdxConfigured,
+    note: `${tdxConfigured ? 'TDX 班表查詢已啟用' : 'TDX 憑證尚未設定；高鐵／台鐵班次不可用'}。行車路徑與估時為 OSRM 計算；沿線道路事件及測速點分別依來源狀態顯示，並非即時車速或導航指示。`,
     resolvedOrigin: originHub?.label || from,
     resolvedDestination: destHub?.label || to,
     originCoords,
