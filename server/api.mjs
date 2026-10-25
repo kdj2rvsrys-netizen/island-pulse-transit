@@ -215,6 +215,7 @@ async function getRoadEvents() {
   }
   try { return await roadEventPending; }
   catch (error) {
+    console.error('[pbs-road-events] official source request failed', error);
     if (roadEventCache) {
       return { ...roadEventCache.result, status: 'stale', note: `警廣即時路況來源暫時中斷；顯示上次快取資料。${roadEventCache.result.note}` };
     }
