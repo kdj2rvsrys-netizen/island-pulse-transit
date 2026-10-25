@@ -48,3 +48,48 @@ export interface SpeedCamera {
 export interface TransitStation { id: string; name: string; mode: Mode; coordinates: [number, number]; }
 export interface TransitRoute { id: string; name: string; mode: Mode; color: string; stations: string[]; }
 export interface TransitTrip { id: string; mode: Mode; route: string; origin: string; destination: string; departure: string; arrival: string; status: string; delayMinutes?: number; meta: DataMeta; }
+
+export interface TransitFilterOptions {
+  station?: string;
+  operator?: string;
+  city?: string;
+  route?: string;
+  airport?: string;
+  refresh?: boolean;
+}
+
+export interface RouteUpcomingTrip {
+  trainNo: string;
+  origin: string;
+  destination: string;
+  departure: string;
+  arrival: string;
+  durationMinutes: number | null;
+  durationText: string;
+}
+
+export interface RouteOptionItem {
+  mode: Mode;
+  available: boolean;
+  title: string;
+  time: string;
+  detail: string;
+  color: string;
+  hops: string;
+  confidence: Confidence;
+  source: string;
+  upcomingTrips: RouteUpcomingTrip[];
+}
+
+export interface MultiModalRouteResult {
+  status: DataStatus;
+  source: string;
+  updatedAt: string;
+  fetchedAt?: string;
+  tdxConfigured?: boolean;
+  resolvedOrigin?: string;
+  resolvedDestination?: string;
+  options: RouteOptionItem[];
+  note?: string;
+}
+
