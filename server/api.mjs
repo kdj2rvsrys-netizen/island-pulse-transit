@@ -1,6 +1,6 @@
 import { createServer } from 'node:http';
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
+import { extname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
   extractCsvFromZipBuffer,
@@ -30,8 +30,8 @@ function loadEnvFile() {
 }
 loadEnvFile();
 
-const HOST = '127.0.0.1';
-const PORT = Number(process.env.API_PORT || 8788);
+const HOST = process.env.HOST || '0.0.0.0';
+const PORT = Number(process.env.PORT || process.env.API_PORT || 8788);
 const METADATA_7320_URL = 'https://data.gov.tw/api/v2/rest/dataset/7320';
 const METADATA_13940_URL = 'https://data.gov.tw/api/v2/rest/dataset/13940';
 const METADATA_15221_URL = 'https://data.gov.tw/api/v2/rest/dataset/15221';
@@ -346,13 +346,13 @@ const HUB_DIRECTORY = [
 function resolveHub(input = '') {
   const raw = String(input).trim();
   const cleaned = raw.replace(/臺/g, '台').replace(/(高鐵站|火車站|車站|機場|站|市|縣)$/g, '');
-  if (!cleaned) return HUB_DIRECTORY[2];
+  if (!cleaned) return null;
   return (
     HUB_DIRECTORY.find((hub) => hub.keys.some((k) => {
       const nk = k.replace(/臺/g, '台');
       return nk === cleaned || raw.replace(/臺/g, '台').includes(nk) || cleaned.includes(nk);
     }))
-    || HUB_DIRECTORY[2]
+    || null
   );
 }
 
@@ -429,11 +429,15 @@ async function fetchDrivingRoute(originCoords, destCoords) {
   };
 }
 
-function countCorridorAlerts(path = []) {
+async function countCorridorAlerts(path = []) {
   if (!path.length) return { eventsCount: 0, camerasCount: 0 };
   const samplePoints = path.filter((_, idx) => idx % Math.max(1, Math.floor(path.length / 18)) === 0 || idx === path.length - 1);
-  const activeEvents = (roadEventCache?.result?.data || []).filter((e) => !e.cleared);
-  const cameras = cameraCache?.result?.data || [];
+  const [eventsResult, camerasResult] = await Promise.all([
+    roadEventCache?.result ? Promise.resolve(roadEventCache.result) : getRoadEvents(),
+    cameraCache?.result ? Promise.resolve(cameraCache.result) : getSpeedCameras(),
+  ]);
+  const activeEvents = (eventsResult.data || []).filter((e) => !e.cleared);
+  const cameras = camerasResult.data || [];
 
   let eventsCount = 0;
   for (const ev of activeEvents) {
@@ -526,11 +530,17 @@ async function getTransitTrips(mode = '高鐵', options = {}) {
     let list = Array.isArray(raw) ? raw : [];
     let isTraDailyFallback = false;
 
+    if (mode === '台鐵' && station !== 'all') {
+      const currentTime = twDateTime.slice(11, 16);
+      list = list.filter((item) => String(item.ScheduledDepartureTime || '').slice(0, 5) >= currentTime);
+    }
+
     if (mode === '台鐵' && station !== 'all' && list.length === 0) {
       const fallbackUrl = `${TDX_API_BASE}/v2/Rail/TRA/DailyTimetable/Station/${encodeURIComponent(station)}/${today}?$top=50&$format=JSON`;
       const fallbackRaw = await fetchTdxJson(fallbackUrl, { forceRefresh });
       if (Array.isArray(fallbackRaw) && fallbackRaw.length > 0) {
-        list = fallbackRaw;
+        const currentTime = twDateTime.slice(11, 16);
+        list = fallbackRaw.filter((item) => String(item.DepartureTime || '').slice(0, 5) >= currentTime);
         isTraDailyFallback = true;
       }
     }
@@ -567,7 +577,7 @@ async function getTransitTrips(mode = '高鐵', options = {}) {
             origin: item.StationName?.Zh_tw || '指定車站',
             destination: item.EndingStationName?.Zh_tw || '終點站',
             departure: (item.DepartureTime || item.ArrivalTime || '').slice(0, 5) || '--:--',
-            arrival: (item.ArrivalTime || item.DepartureTime || '').slice(0, 5) || '--:--',
+            arrival: null,
             status: '當日定期班表',
             delayMinutes: 0,
             meta: { source: '交通部 TDX・台鐵車站每日時刻表 v2（離峰時段自動切換）', updatedAt: today, fetchedAt, status: 'available', confidence: 'scheduled' },
@@ -581,7 +591,7 @@ async function getTransitTrips(mode = '高鐵', options = {}) {
           origin: item.StationName?.Zh_tw || '目前車站',
           destination: item.EndingStationName?.Zh_tw || '終點站',
           departure: (item.ScheduledDepartureTime || '').slice(0, 5) || '--:--',
-          arrival: (item.ScheduledArrivalTime || '').slice(0, 5) || '--:--',
+          arrival: null,
           status: delay > 0 ? `晚 ${delay} 分` : '準點',
           delayMinutes: delay,
           meta: { source: '交通部 TDX・台鐵車站即時看板 v2', updatedAt: item.UpdateTime?.slice(0, 16) || twDateTime, fetchedAt, status: 'available', confidence: 'live' },
@@ -704,6 +714,21 @@ function buildFallbackOdTrips(prefix, originName, destName, timePart, baseDurati
 }
 
 async function getMultiModalRoutes({ from = '臺北車站', to = '左營站', departAt = '' }) {
+  const originHub = resolveHub(from);
+  const destHub = resolveHub(to);
+  if (!originHub || !destHub) {
+    return {
+      status: 'error', source: 'Island Pulse 地點查詢', updatedAt: '', fetchedAt: new Date().toISOString(), options: [],
+      note: `無法辨識「${!originHub ? from : to}」。請從建議地點選擇縣市、車站或已支援地點。`,
+    };
+  }
+  const normalizePlace = (value) => String(value).trim().replace(/臺/g, '台').replace(/(高鐵站|火車站|車站|機場|站|市|縣)$/g, '');
+  if (normalizePlace(from) === normalizePlace(to)) {
+    return {
+      status: 'error', source: 'Island Pulse 地點查詢', updatedAt: '', fetchedAt: new Date().toISOString(), options: [],
+      note: '起點與目的地相同，請輸入不同地點。',
+    };
+  }
   const clientId = process.env.TDX_CLIENT_ID?.trim();
   const clientSecret = process.env.TDX_CLIENT_SECRET?.trim();
   const fetchedAt = new Date().toISOString();
@@ -723,15 +748,13 @@ async function getMultiModalRoutes({ from = '臺北車站', to = '左營站', de
     };
   }
 
-  const originHub = resolveHub(from);
-  const destHub = resolveHub(to);
   const originCoords = originHub.coords;
   const destCoords = destHub.coords;
   const transitGoogleUrl = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(from)}&destination=${encodeURIComponent(to)}&travelmode=transit`;
   const drivingGoogleUrl = `https://www.google.com/maps/dir/?api=1&origin=${encodeURIComponent(from)}&destination=${encodeURIComponent(to)}&travelmode=driving`;
 
   const drivingRoute = await fetchDrivingRoute(originCoords, destCoords);
-  const corridorAlerts = countCorridorAlerts(drivingRoute.path);
+  const corridorAlerts = await countCorridorAlerts(drivingRoute.path);
   const options = [];
 
   // 1. 高鐵 (THSR OD — reuses cached full-day timetable first to save TDX quota!)
@@ -1092,7 +1115,7 @@ async function getMultiModalRoutes({ from = '臺北車站', to = '左營站', de
   };
 }
 
-export function createApiServer() {
+export function createApiServer({ serveClient = false } = {}) {
   return createServer(async (request, response) => {
     const reqUrl = new URL(request.url || '/', `http://${HOST}:${PORT}`);
     const pathname = reqUrl.pathname;
@@ -1148,7 +1171,7 @@ export function createApiServer() {
       const departAt = reqUrl.searchParams.get('departAt') || '';
       try {
         const result = await getMultiModalRoutes({ from, to, departAt });
-        response.writeHead(result.status === 'error' ? 502 : 200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+        response.writeHead(result.status === 'error' ? 400 : 200, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
         response.end(JSON.stringify(result));
       } catch {
         response.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
@@ -1164,12 +1187,41 @@ export function createApiServer() {
       return;
     }
 
+    if (serveClient && (request.method === 'GET' || request.method === 'HEAD') && !pathname.startsWith('/api/')) {
+      const clientRoot = resolve(process.cwd(), 'dist');
+      let relativePath;
+      try { relativePath = decodeURIComponent(pathname).replace(/^[/\\]+/, ''); }
+      catch {
+        response.writeHead(400);
+        response.end();
+        return;
+      }
+      let clientFile = resolve(clientRoot, relativePath || 'index.html');
+      if (!clientFile.startsWith(`${clientRoot}/`) && !clientFile.startsWith(`${clientRoot}\\`) && clientFile !== resolve(clientRoot, 'index.html')) {
+        response.writeHead(403);
+        response.end();
+        return;
+      }
+      if (!existsSync(clientFile) || !statSync(clientFile).isFile()) {
+        clientFile = resolve(clientRoot, 'index.html');
+      }
+      if (!existsSync(clientFile)) {
+        response.writeHead(503, { 'Content-Type': 'text/plain; charset=utf-8' });
+        response.end('網站尚未建置，請先執行 npm run build');
+        return;
+      }
+      const mimeTypes = { '.css': 'text/css; charset=utf-8', '.html': 'text/html; charset=utf-8', '.ico': 'image/x-icon', '.js': 'text/javascript; charset=utf-8', '.json': 'application/json; charset=utf-8', '.png': 'image/png', '.svg': 'image/svg+xml', '.webp': 'image/webp' };
+      response.writeHead(200, { 'Content-Type': mimeTypes[extname(clientFile)] || 'application/octet-stream', 'Cache-Control': clientFile.endsWith('index.html') ? 'no-cache' : 'public, max-age=3600' });
+      response.end(request.method === 'HEAD' ? undefined : readFileSync(clientFile));
+      return;
+    }
+
     response.writeHead(404, { 'Content-Type': 'application/json; charset=utf-8' });
     response.end(JSON.stringify({ error: 'Not found' }));
   });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
-  createApiServer().listen(PORT, HOST, () => console.log(`Island Pulse data API listening at http://${HOST}:${PORT}`));
+  createApiServer({ serveClient: true }).listen(PORT, HOST, () => console.log(`Island Pulse web server listening on ${HOST}:${PORT}`));
 }
 

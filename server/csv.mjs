@@ -180,6 +180,22 @@ export function mergeSpeedCameras(primary7320, highway13940) {
 export function normalizePbsRoadEvents(items, { fetchedAt }) {
   if (!Array.isArray(items)) throw new Error('警廣路況資料格式不符');
   const seenUids = new Set();
+  const referenceDate = new Date(new Date(fetchedAt).getTime() + 8 * 60 * 60 * 1000).toISOString().slice(0, 10);
+
+  function eventPhase(text) {
+    const dates = [...text.matchAll(/(?:民國\s*)?(\d{2,4})\s*年\s*(\d{1,2})\s*月\s*(\d{1,2})\s*日/g)]
+      .map((match) => {
+        const year = Number(match[1]);
+        const fullYear = year < 1911 ? year + 1911 : year;
+        return `${fullYear}-${String(Number(match[2])).padStart(2, '0')}-${String(Number(match[3])).padStart(2, '0')}`;
+      });
+    if (dates.length === 0) return 'active';
+    if (dates[0] > referenceDate) return 'upcoming';
+    const hasEndDate = dates.length > 1 || /當日.*(?:至|到).*止/.test(text);
+    const endDate = dates.length > 1 ? dates[dates.length - 1] : dates[0];
+    if (hasEndDate && endDate < referenceDate) return 'ended';
+    return 'active';
+  }
 
   return items.flatMap((item, idx) => {
     const lat = Number(item.y1);
@@ -200,12 +216,16 @@ export function normalizePbsRoadEvents(items, { fetchedAt }) {
     const modDttm = String(item.modDttm || '').trim();
 
     let kind;
+    const explicitlyReopened = /正式通車|開放通車|恢復通行|已搶通/.test(comment);
+    const explicitClosure = /全線封閉|雙向封閉|道路封閉|封路|禁止通行|阻斷|斷道/.test(comment);
     if (roadtype === '道路施工' || /施工|刨鋪|養護|改建|工程/.test(roadtype)) {
       kind = 'roadwork';
     } else if (roadtype === '阻塞' || /壅塞|車多|回堵/.test(roadtype)) {
       kind = 'congestion';
-    } else if (roadtype === '交通管制' || roadtype === '災變' || /封閉|全線封閉|雙向封閉|管制通行|坍方|落石阻斷/.test(comment)) {
+    } else if (!explicitlyReopened && (explicitClosure || (roadtype === '災變' && /坍方|落石|災害|阻斷/.test(comment)))) {
       kind = 'closure';
+    } else if (roadtype === '交通管制' || roadtype === '災變') {
+      kind = 'incident';
     } else {
       kind = 'incident';
     }
@@ -246,6 +266,7 @@ export function normalizePbsRoadEvents(items, { fetchedAt }) {
       observedAt: happentime || updatedAt.slice(11, 16) || '近期',
       updatedAt,
       cleared,
+      phase: eventPhase(comment),
       region: String(item.region || 'A').trim(),
       authority: srcdetail,
       meta: {

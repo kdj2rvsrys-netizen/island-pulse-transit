@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "node server/dev.mjs",
     "api": "node server/api.mjs",
+    "start": "node server/api.mjs",
     "test": "node --test server/*.test.mjs",
     "build": "tsc -b && vite build",
     "typecheck": "tsc -b --pretty",

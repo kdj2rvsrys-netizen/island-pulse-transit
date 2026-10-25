@@ -1,0 +1,11 @@
+services:
+  - type: web
+    name: island-pulse-transit
+    runtime: node
+    plan: free
+    buildCommand: npm ci && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/status
+    envVars:
+      - key: NODE_VERSION
+        value: 24.22.1

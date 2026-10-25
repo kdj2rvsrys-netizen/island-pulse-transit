@@ -145,7 +145,7 @@ export function RoutesPage() {
   }, [submittedRoute]);
 
   const isLiveTdx = routeResult.status === 'available' && routeResult.options.length > 0;
-  const activeOptions = isLiveTdx ? routeResult.options : demoFallbackOptions;
+  const activeOptions = isLiveTdx ? routeResult.options : routeResult.status === 'unavailable' ? demoFallbackOptions : [];
   const filteredOptions = activeOptions.filter((item) => modes.includes(item.mode));
   const selectedOption = filteredOptions.find((item) => item.mode === selectedMode) ?? filteredOptions[0];
 
@@ -179,7 +179,7 @@ export function RoutesPage() {
       eyebrow={isLiveTdx ? 'MULTI-MODAL NAVIGATION / TDX + OSRM LIVE' : 'MULTI-MODAL NAVIGATION / PREVIEW'}
       title="路線規劃與跨運具導航"
       description="比對高鐵、台鐵、自駕、捷運、客運與航班，提供分段搭乘步驟、即時車次、預估票價與官方訂票連結。"
-      action={<DataBadge status={routeResult.status === 'loading' ? 'loading' : 'available'} confidence={isLiveTdx ? 'live' : 'demo'}/>}
+      action={<DataBadge status={routeResult.status} confidence={isLiveTdx ? 'live' : 'demo'}/>}
     />
     <div className="route-banner">
       <div className="route-banner-mark"><Icon name="route" size={25}/></div>
@@ -248,6 +248,8 @@ export function RoutesPage() {
       ))}
       {modes.length === 0 && <div className="state-panel compact-state"><h3>請至少選擇一種運具或導航模式</h3></div>}
     </div>
+
+    {routeResult.status === 'error' && <div className="state-panel" role="alert"><div className="state-symbol state-error"><Icon name="info"/></div><h3>無法規劃這組起訖地點</h3><p>{routeResult.note ?? '請檢查起點與目的地，並選擇建議地點後重試。'}</p></div>}
 
     {selectedOption && (
       <div className="trip-detail" style={{ marginTop: 16, flexDirection: 'column', alignItems: 'stretch', gap: 16 }}>
@@ -351,8 +353,8 @@ export function RoutesPage() {
     <div className="route-disclaimer">
       <Icon name="info"/>
       <div>
-        <b>{isLiveTdx ? '資料來源：交通部 TDX ＋ OSRM 道路導航引擎 ＋ 警廣即時路況' : '尚未連接 TDX 路線查詢'}</b>
-        <p>{isLiveTdx ? '高鐵與台鐵顯示當日官方 OD 班表與實際行車時間，自駕路線由 OSRM 計算真實道路里程並掃描沿線警廣事件與測速點；訂票請以高鐵、台鐵及各客運／航空公司官方系統為準。' : '目前顯示 Demo 示意資料。'}</p>
+          <b>{isLiveTdx ? '資料來源：交通部 TDX ＋ OSRM 道路導航引擎 ＋ 警廣即時路況' : routeResult.status === 'error' ? '路線查詢未完成' : '尚未連接 TDX 路線查詢'}</b>
+          <p>{isLiveTdx ? '高鐵與台鐵顯示當日官方 OD 班表，自駕路線由 OSRM 計算道路里程並掃描沿線警廣事件與測速點；捷運、客運及航班為概略轉乘建議與費用估算，請以各業者官方系統確認班次、票價和接駁。' : routeResult.status === 'error' ? (routeResult.note ?? '請修正起訖地點後重試。') : '目前顯示 Demo 示意資料。'}</p>
       </div>
     </div>
   </div>;

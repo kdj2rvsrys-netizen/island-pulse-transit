@@ -100,3 +100,16 @@ test('normalizes PBS live road events and classifies semantic kind and cleared s
   assert.equal(events[1].cleared, true);
   assert.equal(events[1].severity, 'low');
 });
+
+test('marks future and expired road notices separately and does not label reopened roads as closures', () => {
+  const events = normalizePbsRoadEvents([
+    { UID: 'future', roadtype: '交通管制', happendate: '2026-10-26', modDttm: '2026-10-26 00:10', areaNm: '日月潭', comment: '自115年11月1日當日8時起至12時止，辦理活動管制。', y1: '23.8', x1: '120.9' },
+    { UID: 'expired', roadtype: '交通管制', happendate: '2026-10-26', modDttm: '2026-10-26 00:10', areaNm: '彰化', comment: '自115年3月2日至115年6月1日止，活動管制。', y1: '24.0', x1: '120.5' },
+    { UID: 'open', roadtype: '交通管制', happendate: '2026-10-26', modDttm: '2026-10-26 00:10', areaNm: '花蓮', comment: '於115年1月1日正式通車，維持雙向各1快1慢車道。', y1: '23.9', x1: '121.6' },
+  ], { fetchedAt: '2026-10-25T18:00:00Z' });
+
+  assert.equal(events[0].phase, 'upcoming');
+  assert.equal(events[1].phase, 'ended');
+  assert.equal(events[2].phase, 'active');
+  assert.equal(events[2].kind, 'incident');
+});

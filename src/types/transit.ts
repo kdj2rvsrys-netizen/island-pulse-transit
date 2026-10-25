@@ -26,6 +26,7 @@ export interface RoadEvent {
   updatedAt?: string;
   expectedClearance?: string;
   cleared?: boolean;
+  phase?: 'active' | 'upcoming' | 'ended';
   region?: string;
   authority?: string;
   meta: DataMeta;
@@ -47,7 +48,7 @@ export interface SpeedCamera {
 }
 export interface TransitStation { id: string; name: string; mode: Mode; coordinates: [number, number]; }
 export interface TransitRoute { id: string; name: string; mode: Mode; color: string; stations: string[]; }
-export interface TransitTrip { id: string; mode: Mode; route: string; origin: string; destination: string; departure: string; arrival: string; status: string; delayMinutes?: number; meta: DataMeta; }
+export interface TransitTrip { id: string; mode: Mode; route: string; origin: string; destination: string; departure: string; arrival: string | null; status: string; delayMinutes?: number; meta: DataMeta; }
 
 export interface TransitFilterOptions {
   station?: string;

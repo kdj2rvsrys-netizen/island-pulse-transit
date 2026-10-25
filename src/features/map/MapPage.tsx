@@ -25,6 +25,7 @@ const formatDataTime = (value: string) => {
 
 function isActiveRecentEvent(event: RoadEvent, latestDay: string) {
   if (event.cleared) return false;
+  if (event.phase && event.phase !== 'active') return false;
   if (!latestDay || !event.updatedAt) return true;
   return event.updatedAt.startsWith(latestDay);
 }
@@ -81,8 +82,7 @@ export function MapPage({ status, setStatus, navigate, onLocateSuccess }: {
 
   const activeEvents = useMemo(() => {
     if (useDemoEvents || includeCleared) return rawEvents;
-    const filtered = rawEvents.filter((item) => isActiveRecentEvent(item, latestDay));
-    return filtered.length > 0 ? filtered : rawEvents.filter((item) => !item.cleared);
+    return rawEvents.filter((item) => isActiveRecentEvent(item, latestDay));
   }, [rawEvents, useDemoEvents, includeCleared, latestDay]);
 
   const activeSelected = useMemo(() => {
@@ -195,7 +195,7 @@ export function MapPage({ status, setStatus, navigate, onLocateSuccess }: {
       {effectiveStatus === 'error' && <div className="inline-state error-state"><Icon name="info"/>道路事件載入失敗，未影響測速圖層。<button onClick={() => { setStatus('available'); setReloadTick((v) => v + 1); }}>重試</button><button onClick={() => { setUseDemoEvents(true); setStatus('available'); }}>改看 Demo</button></div>}
       {effectiveStatus === 'stale' && <div className="stale-banner"><Icon name="clock" size={15}/>資料已過期・最後更新 {eventResult.updatedAt || '08:12'}</div>}
       {effectiveStatus !== 'empty' && effectiveStatus !== 'error' && effectiveStatus !== 'loading' && <>
-        {activeSelected && <div className="selected-event-card"><div className={`event-icon kind-${activeSelected.kind}`}><Icon name={eventIcons[activeSelected.kind]} size={19}/></div><div className="selected-event-copy"><div className="selected-meta"><span>{activeSelected.subKind ?? eventLabels[activeSelected.kind]}</span><span className={`severity severity-${activeSelected.severity}`}>{severityLabels[activeSelected.severity]}</span>{activeSelected.cleared && <span className="severity">已排除</span>}<button className="icon-button close-detail" aria-label="關閉事件詳情" onClick={() => setSelected(null)}><Icon name="close" size={16}/></button></div><b>{activeSelected.title}</b><p>{activeSelected.location}</p><small>{activeSelected.direction}・通報時間 {activeSelected.observedAt}{activeSelected.authority ? `・${activeSelected.authority}` : ''}</small><p className="selected-description">{activeSelected.description}</p><div className="event-demo-note">{activeSelected.meta.confidence === 'official-static' ? `${activeSelected.meta.source}・非即時資料` : activeSelected.meta.confidence === 'official-live' ? `${activeSelected.meta.source}・更新於 ${activeSelected.updatedAt ?? activeSelected.observedAt}` : 'Demo 資料・非即時資訊'}</div></div></div>}
+        {activeSelected && <div className="selected-event-card"><div className={`event-icon kind-${activeSelected.kind}`}><Icon name={eventIcons[activeSelected.kind]} size={19}/></div><div className="selected-event-copy"><div className="selected-meta"><span>{activeSelected.subKind ?? eventLabels[activeSelected.kind]}</span><span className={`severity severity-${activeSelected.severity}`}>{severityLabels[activeSelected.severity]}</span>{activeSelected.phase === 'upcoming' && <span className="severity severity-medium">尚未開始</span>}{activeSelected.phase === 'ended' && <span className="severity">期間已過</span>}{activeSelected.cleared && <span className="severity">已排除</span>}<button className="icon-button close-detail" aria-label="關閉事件詳情" onClick={() => setSelected(null)}><Icon name="close" size={16}/></button></div><b>{activeSelected.title}</b><p>{activeSelected.location}</p><small>{activeSelected.direction}・通報時間 {activeSelected.observedAt}{activeSelected.authority ? `・${activeSelected.authority}` : ''}</small><p className="selected-description">{activeSelected.description}</p><div className="event-demo-note">{activeSelected.meta.confidence === 'official-static' ? `${activeSelected.meta.source}・非即時資料` : activeSelected.meta.confidence === 'official-live' ? `${activeSelected.meta.source}・更新於 ${activeSelected.updatedAt ?? activeSelected.observedAt}` : 'Demo 資料・非即時資訊'}</div></div></div>}
         <div className="event-list-heading"><b>即時事件與路況</b><button className="icon-button" aria-label="重新整理路況資料" onClick={() => { setReloadTick((v) => v + 1); }}><Icon name="refresh" size={16}/></button></div>
         <div className="nearby-list">{activeEvents.slice(0, 12).map((event) => <button className={`nearby-row ${activeSelected?.id === event.id ? 'selected-row' : ''}`} key={event.id} onClick={() => selectEvent(event)}><span className={`event-icon kind-${event.kind}`}><Icon name={eventIcons[event.kind]} size={17}/></span><span className="nearby-copy"><b>{event.location}</b><small><span className={`kind-text kind-text-${event.kind}`}>{event.subKind ?? eventLabels[event.kind]}</span>・{event.title}</small></span><span className="nearby-time">{event.observedAt}</span></button>)}</div>
       </>}
