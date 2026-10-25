@@ -254,8 +254,16 @@ async function getTransitTrips(mode = '高鐵') {
       '高鐵': `${TDX_API_BASE}/v2/Rail/THSR/DailyTimetable/TrainDate/${today}?$top=30&$format=JSON`,
       '台鐵': `${TDX_API_BASE}/v2/Rail/TRA/LiveBoard?$top=30&$format=JSON`,
       '捷運': `${TDX_API_BASE}/v2/Rail/Metro/FirstLastTimetable/TRTC?$top=30&$format=JSON`,
-      '公車': `${TDX_API_BASE}/v2/Bus/EstimatedTimeOfArrival/City/Taipei?$top=30&$format=JSON`,
+      '公車': `${TDX_API_BASE}/v2/Bus/EstimatedTimeOfArrival/City/Taipei?$filter=EstimateTime%20gt%200&$top=30&$format=JSON`,
       '航班': `${TDX_API_BASE}/v2/Air/FIDS/Airport/Departure/TPE?$top=30&$format=JSON`,
+    };
+    const metroLineNames = {
+      BL: '板南線',
+      R: '淡水信義線',
+      G: '松山新店線',
+      O: '中和新蘆線',
+      BR: '文湖線',
+      Y: '環狀線',
     };
     const url = endpointMap[mode] || endpointMap['高鐵'];
     const res = await fetch(url, {
@@ -299,17 +307,46 @@ async function getTransitTrips(mode = '高鐵') {
           meta: { source: '交通部 TDX・台鐵車站即時看板 v2', updatedAt: item.UpdateTime?.slice(0, 16) || fetchedAt.slice(0, 16), fetchedAt, status: 'available', confidence: 'live' },
         };
       }
+      if (mode === '捷運') {
+        const lineCode = item.LineID || item.LineNo || '';
+        const lineLabel = metroLineNames[lineCode] ? `${metroLineNames[lineCode]} (${lineCode})` : lineCode || '台北捷運';
+        return {
+          id: `metro-${item.StationID || idx}-${ item.DestinationStaionID || idx}-${idx}`,
+          mode: '捷運',
+          route: `${lineLabel}・${item.StationID || ''}`.replace(/・$/, ''),
+          origin: item.StationName?.Zh_tw || '捷運站',
+          destination: item.DestinationStationName?.Zh_tw || item.TripHeadSign || '終點站',
+          departure: item.FirstTrainTime || '06:00',
+          arrival: item.LastTrainTime || '24:00',
+          status: '首末班車時刻',
+          meta: { source: '交通部 TDX・台北捷運首末班車時刻表 v2', updatedAt: item.UpdateTime?.slice(0, 10) || today, fetchedAt, status: 'available', confidence: 'scheduled' },
+        };
+      }
+      if (mode === '公車') {
+        const estMin = typeof item.EstimateTime === 'number' ? Math.max(1, Math.round(item.EstimateTime / 60)) : null;
+        return {
+          id: `bus-${item.RouteUID || idx}-${item.StopUID || idx}-${idx}`,
+          mode: '公車',
+          route: `公車 ${item.RouteName?.Zh_tw || ''}`.trim(),
+          origin: item.StopName?.Zh_tw || '候車站位',
+          destination: item.Direction === 1 ? '返程方向' : '去程方向',
+          departure: estMin !== null ? (estMin <= 1 ? '進站中' : `約 ${estMin} 分`) : '營運中',
+          arrival: (item.UpdateTime || '').slice(11, 16) || '即時推算',
+          status: estMin !== null && estMin <= 2 ? '即將進站' : '正常營運',
+          meta: { source: '交通部 TDX・市區公車預估到站時間 v2', updatedAt: (item.UpdateTime || fetchedAt).slice(0, 16).replace('T', ' '), fetchedAt, status: 'available', confidence: 'live' },
+        };
+      }
       if (mode === '航班') {
         return {
-          id: `air-${item.FlightNumber || idx}`,
+          id: `air-${item.FlightNumber || idx}-${idx}`,
           mode: '航班',
           route: `${item.AirlineID || ''} ${item.FlightNumber || ''}`.trim(),
           origin: item.DepartureAirportID || 'TPE',
           destination: item.ArrivalAirportID || '目的地',
           departure: (item.ScheduleDepartureTime || '').slice(11, 16) || '--:--',
-          arrival: (item.EstimatedDepartureTime || item.ActualDepartureTime || '').slice(11, 16) || '--:--',
+          arrival: (item.EstimatedDepartureTime || item.ActualDepartureTime || item.ScheduleDepartureTime || '').slice(11, 16) || '--:--',
           status: item.DepartureRemark || '時刻表',
-          meta: { source: '交通部 TDX・航空即時航班資訊 v2', updatedAt: item.UpdateTime?.slice(0, 16) || today, fetchedAt, status: 'available', confidence: 'live' },
+          meta: { source: '交通部 TDX・航空即時航班資訊 v2', updatedAt: (item.UpdateTime || today).slice(0, 16).replace('T', ' '), fetchedAt, status: 'available', confidence: 'live' },
         };
       }
       return {
@@ -318,7 +355,7 @@ async function getTransitTrips(mode = '高鐵') {
         route: item.RouteName?.Zh_tw || item.LineName?.Zh_tw || `${mode}路線`,
         origin: item.StopName?.Zh_tw || item.StationName?.Zh_tw || '站點',
         destination: item.DestinationStationName?.Zh_tw || '往終點站',
-        departure: item.FirstTrainTime || (item.EstimateTime ? `${Math.max(1, Math.round(item.EstimateTime / 60))} 分` : '營運中'),
+        departure: item.FirstTrainTime || '營運中',
         arrival: item.LastTrainTime || '依班距',
         status: 'TDX 資料',
         meta: { source: `交通部 TDX・${mode}公開資料 v2`, updatedAt: today, fetchedAt, status: 'available', confidence: 'live' },
@@ -331,7 +368,7 @@ async function getTransitTrips(mode = '高鐵') {
       source: `交通部 TDX・${mode}公開資料服務`,
       updatedAt: fetchedAt.slice(0, 16).replace('T', ' '),
       fetchedAt,
-      confidence: mode === '高鐵' ? 'scheduled' : 'live',
+      confidence: mode === '高鐵' || mode === '捷運' ? 'scheduled' : 'live',
       tdxConfigured: true,
     };
     transitCache.set(mode, { result, cachedAt: Date.now() });
